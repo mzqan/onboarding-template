@@ -5,6 +5,7 @@
 // brute force v1: {"runtime_ms": 331.281, "memory_mb": 16.777, "score": 0.695}
 // open mp v2: {"runtime_ms": 340.116, "memory_mb": 16.777, "score": 0.725}
 // flat vector v3: {"runtime_ms": 287.349, "memory_mb": 16.777, "score": 0.817}
+// boundary vs interior v4: {"runtime_ms": 223.805, "memory_mb": 16.777, "score": 1.003}
 
 class Grid {
 private:
@@ -43,18 +44,23 @@ void apply_stencil(const Grid& old_grid, Grid& new_grid){
   const std::size_t rows {old_grid.rows()};
   const std::size_t cols {old_grid.cols()};
 
+  // top-bottom boundary unchanged
+  for (std::size_t j = 0; j < cols; ++j) {
+      new_grid(0, j) = old_grid(0, j);
+      new_grid(rows - 1, j) = old_grid(rows - 1, j);
+  }
+
+  //left-right boundary unchanged
+  for (std::size_t i = 1; i < rows - 1; ++i) {
+      new_grid(i, 0) = old_grid(i, 0);
+      new_grid(i, cols - 1) = old_grid(i, cols - 1);
+  }
+
   #pragma openmp parallel for
-  for (std::size_t i{0}; i < rows; ++i){
-    for (std::size_t j{0}; j < cols; ++j){
-      // boundary points unchanged
-      if (i == 0 || i == rows - 1 || 
-          j == 0 || j == cols - 1) {
-            new_grid(i, j) = old_grid(i, j);
-      }
-      else {
-        // weighted avg
+  for (std::size_t i{1}; i < rows - 1; ++i){
+    for (std::size_t j{1}; j < cols - 1; ++j){
+      // weighted avg
         new_grid(i, j) = 0.5 * old_grid(i, j) + 0.125 * (old_grid(i - 1, j) + old_grid(i + 1, j) + old_grid(i, j - 1) + old_grid(i, j + 1));
-      }
     }
   }
 }
