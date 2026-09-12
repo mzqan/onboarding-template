@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <vector>
 // brute force v1: {"runtime_ms": 331.281, "memory_mb": 16.777, "score": 0.695}
+// open mp v2: {"runtime_ms": 340.116, "memory_mb": 16.777, "score": 0.725}
 
 class Grid {
 private:
@@ -41,6 +42,7 @@ void apply_stencil(const Grid& old_grid, Grid& new_grid){
   const std::size_t rows {old_grid.rows()};
   const std::size_t cols {old_grid.cols()};
 
+  #pragma openmp parallel for
   for (std::size_t i{0}; i < rows; ++i){
     for (std::size_t j{0}; j < cols; ++j){
       // boundary points unchanged
