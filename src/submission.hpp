@@ -4,27 +4,28 @@
 #include <vector>
 // brute force v1: {"runtime_ms": 331.281, "memory_mb": 16.777, "score": 0.695}
 // open mp v2: {"runtime_ms": 340.116, "memory_mb": 16.777, "score": 0.725}
+// flat vector v3: {"runtime_ms": 287.349, "memory_mb": 16.777, "score": 0.817}
 
 class Grid {
 private:
   std::size_t rows_;
   std::size_t cols_;
-  std::vector<std::vector<double>> data_;
+  std::vector<double> data_;
 
 public:
   Grid(std::size_t rows, std::size_t cols)
     : rows_(rows)
     , cols_(cols)
-    , data_(rows, std::vector<double>(cols)) {}
+    , data_(rows * cols) {}
 
   // returns reference to cell, allows r/w
   double& operator()(std::size_t i, std::size_t j){
-    return data_[i][j];
+    return data_[i * cols_ + j];
   }
 
   // returns copy to cell, read-only
   double operator()(std::size_t i, std::size_t j) const{
-    return data_[i][j];
+    return data_[i * cols_ + j];
   }
 
   std::size_t rows() const {
