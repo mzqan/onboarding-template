@@ -3,10 +3,11 @@
 #include <cstddef>
 #include <vector>
 // brute force v1: {"runtime_ms": 331.281, "memory_mb": 16.777, "score": 0.695}
-// open mp v2: {"runtime_ms": 340.116, "memory_mb": 16.777, "score": 0.725}
+// open mp v2 (ignore): {"runtime_ms": 340.116, "memory_mb": 16.777, "score": 0.725}
 // flat vector v3: {"runtime_ms": 287.349, "memory_mb": 16.777, "score": 0.817}
 // boundary vs interior v4: {"runtime_ms": 223.805, "memory_mb": 16.777, "score": 1.003}
 // views & simd v5: {"runtime_ms": 213.517, "memory_mb": 16.777, "score": 1.032}
+// open mp v6: {"runtime_ms": 116.867, "memory_mb": 16.777, "score": 2.174}
 
 struct GridView {
   double* data;
@@ -85,25 +86,25 @@ void apply_stencil(const Grid& old_grid, Grid& new_grid){
   const std::size_t cols {old_grid.cols()};
 
   // top-bottom boundary unchanged
-  for (std::size_t i {0}; i < cols; ++i){
+  for (std::size_t i = 0; i < cols; ++i){
       new_view(0, i) = old_view(0, i);
       new_view(rows - 1, i) = old_view(rows - 1, i);
   }
 
   //left-right boundary unchanged
-  for (std::size_t i {1}; i < rows - 1; ++i){
+  for (std::size_t i = 1; i < rows - 1; ++i){
       new_view(i, 0) = old_view(i, 0);
       new_view(i, cols - 1) = old_view(i, cols - 1);
   }
 
   // parallelize rows (outputs independent from one another)
-  #pragma openmp parallel for
-  for (std::size_t i{1}; i < rows - 1; ++i){
+  #pragma omp parallel for
+  for (std::size_t i = 1; i < rows - 1; ++i){
       const std::size_t row_start{i * old_view.stride};
 
       // vectorize inner loop (cols are contiguous in memory)
       #pragma omp simd
-      for (std::size_t j{1}; j < cols - 1; ++j){
+      for (std::size_t j = 1; j < cols - 1; ++j){
           const std::size_t index{row_start + j};
 
           new_view.data[index] =
