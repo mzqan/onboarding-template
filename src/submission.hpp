@@ -4,21 +4,14 @@
 #include <vector>
 #include <array>
 
-// brute force v1: {"runtime_ms": 331.281, "memory_mb": 16.777, "score": 0.695}
-// open mp v2 (ignore): {"runtime_ms": 340.116, "memory_mb": 16.777, "score": 0.725}
-// flat vector v3: {"runtime_ms": 287.349, "memory_mb": 16.777, "score": 0.817}
-// boundary vs interior v4: {"runtime_ms": 223.805, "memory_mb": 16.777, "score": 1.003}
-// views & simd v5: {"runtime_ms": 213.517, "memory_mb": 16.777, "score": 1.032}
-// open mp v6: {"runtime_ms": 116.867, "memory_mb": 16.777, "score": 2.174}
-// templated view v7: {"runtime_ms": 119.108, "memory_mb": 16.777, "score": 2.391}
-// n dimensional view + restrict v8: {"runtime_ms": 113.251, "memory_mb": 16.777, "score": 3.009}
-
+// can access Grid data using its shape and strides without copying it
 template <typename T, std::size_t N>
 struct View {
     T* data;
     std::array<std::size_t, N> shape;
     std::array<std::size_t, N> strides;
 
+    // accessed like v(a, b, c, ..)
     template <typename... Indices>
     T& operator()(Indices... indices) const {
         static_assert(sizeof...(Indices) == N);
@@ -62,15 +55,17 @@ public:
         return shape_;
     }
 
-    // # of elements b/w 
+    // # of elements to move in memory by dimension
     const std::array<std::size_t, 2>& strides() const{
         return strides_;
     }
 
+    // r/w
     View<double, 2> view(){
         return {data_.data(), shape_, strides_};
     }
 
+    // read-only
     View<const double, 2> view() const{
         return {data_.data(), shape_, strides_};
     }
