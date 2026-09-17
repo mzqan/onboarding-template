@@ -2,6 +2,8 @@
 
 #include <cstddef>
 #include <vector>
+#include <array>
+
 // brute force v1: {"runtime_ms": 331.281, "memory_mb": 16.777, "score": 0.695}
 // open mp v2 (ignore): {"runtime_ms": 340.116, "memory_mb": 16.777, "score": 0.725}
 // flat vector v3: {"runtime_ms": 287.349, "memory_mb": 16.777, "score": 0.817}
@@ -9,76 +11,84 @@
 // views & simd v5: {"runtime_ms": 213.517, "memory_mb": 16.777, "score": 1.032}
 // open mp v6: {"runtime_ms": 116.867, "memory_mb": 16.777, "score": 2.174}
 // templated view v7: {"runtime_ms": 119.108, "memory_mb": 16.777, "score": 2.391}
+// n dimensional view + restrict v8: {"runtime_ms": 113.251, "memory_mb": 16.777, "score": 3.009}
 
-template <typename T>
+template <typename T, std::size_t N>
 struct View {
     T* data;
+    std::array<std::size_t, N> shape;
+    std::array<std::size_t, N> strides;
 
-    std::size_t rows;
-    std::size_t cols;
-    std::size_t stride;
+    template <typename... Indices>
+    T& operator()(Indices... indices) const {
+        static_assert(sizeof...(Indices) == N);
 
-    T& operator()(std::size_t i, std::size_t j) const {
-        return data[i * stride + j];
+        const std::array<std::size_t, N> index{static_cast<std::size_t>(indices)...};
+
+        std::size_t offset{0};
+
+        for (std::size_t i = 0; i < N; ++i){
+            offset += index[i] * strides[i];
+        }
+
+        return data[offset];
     }
 };
 
-
 class Grid {
 private:
-    std::size_t rows_;
-    std::size_t cols_;
-    std::size_t stride_;
+    std::array<std::size_t, 2> shape_;
+    std::array<std::size_t, 2> strides_;
     std::vector<double> data_;
 
 public:
     Grid(std::size_t rows, std::size_t cols)
-        : rows_(rows)
-        , cols_(cols)
-        , stride_(cols)
-        , data_(rows * stride_) {}
+        : shape_{rows, cols}
+        , strides_{cols, 1}
+        , data_(rows * cols) {}
 
-  // returns reference to cell, allows r/w
-    double& operator()(std::size_t i, std::size_t j){
-        return data_[i * stride_ + j];
+    // r/w
+    double& operator()(std::size_t row, std::size_t col){
+        return data_[row * strides_[0] + col];
     }
 
-  // returns copy to cell, read-only
-    double operator()(std::size_t i, std::size_t j) const{
-        return data_[i * stride_ + j];
+    // read-only
+    const double& operator()(std::size_t row, std::size_t col) const{
+        return data_[row * strides_[0] + col];
     }
 
-    std::size_t rows() const{
-        return rows_;
+    // # of elements per dimension
+    const std::array<std::size_t, 2>& shape() const{
+        return shape_;
     }
 
-    std::size_t cols() const{
-        return cols_;
+    // # of elements b/w 
+    const std::array<std::size_t, 2>& strides() const{
+        return strides_;
     }
 
-    std::size_t stride() const{
-        return stride_;
+    View<double, 2> view(){
+        return {data_.data(), shape_, strides_};
     }
 
-    // Mutable Grid -> mutable View
-    View<double> view(){
-        return {data_.data(), rows_, cols_, stride_};
-    }
-
-    // Const Grid -> read-only View
-    View<const double> view() const {
-        return {data_.data(), rows_, cols_, stride_};
+    View<const double, 2> view() const{
+        return {data_.data(), shape_, strides_};
     }
 };
 
 // Apply the five-point stencil over all interior points, copying the boundary
 // values unchanged from old_grid to new_grid
 void apply_stencil(const Grid& old_grid, Grid& new_grid){
-    auto old_view {old_grid.view()};
-    auto new_view {new_grid.view()};
+    View<const double, 2> old_view {old_grid.view()};
+    View<double, 2> new_view {new_grid.view()};
 
-    const std::size_t rows {old_grid.rows()};
-    const std::size_t cols {old_grid.cols()};
+    // confirms to compiler that input and output arrays do not overlap in memory
+    const double* __restrict old_data {old_view.data};
+    double* __restrict new_data {new_view.data};
+
+    const std::size_t rows {old_grid.shape()[0]};
+    const std::size_t cols {old_grid.shape()[1]};
+    const std::size_t stride {old_grid.strides()[0]};
 
     // top-bottom boundary unchanged
     for (std::size_t i = 0; i < cols; ++i){
@@ -96,7 +106,7 @@ void apply_stencil(const Grid& old_grid, Grid& new_grid){
     #pragma omp parallel for
     for (std::size_t i = 1; i < rows - 1; ++i){
 
-        const std::size_t row_start {i * old_view.stride};
+        const std::size_t row_start {i * stride};
 
         // vectorize inner loop (cols are contiguous in memory)
         #pragma omp simd
@@ -104,13 +114,13 @@ void apply_stencil(const Grid& old_grid, Grid& new_grid){
 
             const std::size_t index {row_start + j};
 
-            new_view.data[index] =
-                0.5 * old_view.data[index]
+            new_data[index] =
+                0.5 * old_data[index]
                 + 0.125 * (
-                    old_view.data[index - old_view.stride]
-                    + old_view.data[index + old_view.stride]
-                    + old_view.data[index - 1]
-                    + old_view.data[index + 1]
+                    old_data[index - stride]
+                    + old_data[index + stride]
+                    + old_data[index - 1]
+                    + old_data[index + 1]
                 );
         }
     }
