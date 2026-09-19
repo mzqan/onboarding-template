@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstring>
 #include <vector>
 #include <array>
 
@@ -72,11 +73,11 @@ public:
 };
 
 // copy top and bottom boundary rows into new_view (includes corners)
-inline void copy_boundaries(View<const double, 2> old_view, View<double, 2> new_view, std::size_t rows, std::size_t cols) {
-    for (std::size_t i = 0; i < cols; ++i){
-        new_view(0, i) = old_view(0, i);
-        new_view(rows - 1, i) = old_view(rows - 1, i);
-    }
+inline void copy_boundaries(View<const double, 2> old_view, View<double, 2> new_view, std::size_t rows, std::size_t cols, std::size_t stride) {
+    // memcpy copies a contiguous block in one call
+    // avoids per-element stride arithmetic and View overhead
+    std::memcpy(new_view.data, old_view.data, cols * sizeof(double));
+    std::memcpy(new_view.data + (rows-1)*stride,  old_view.data + (rows-1)*stride,  cols * sizeof(double));
 }
 
 // Apply the five-point stencil over all interior points, copying the boundary
@@ -92,7 +93,7 @@ void apply_stencil(const Grid& old_grid, Grid& new_grid){
     const auto& [rows, cols] = old_grid.shape();
     const std::size_t stride {old_grid.strides()[0]};
 
-    copy_boundaries(old_view, new_view, rows, cols);
+    copy_boundaries(old_view, new_view, rows, cols, stride);
 
     // parallelize rows (outputs independent from one another)
     #pragma omp parallel for
