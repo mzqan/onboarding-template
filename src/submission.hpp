@@ -116,8 +116,8 @@ public:
 };
 
 // Copy the top and bottom boundary rows from old_grid to new_grid unchanged
-// Returns true if there are interior rows to stencil (rows >= 3), false if the
-// boundary covers the entire grid => apply_stencil early return
+// Returns true if there is an interior to stencil (rows >= 3 AND cols >= 3),
+// false if the boundary covers the entire grid => apply_stencil early return.
 inline bool copy_boundaries(const double* __restrict old_data, double* __restrict new_data, std::size_t rows, std::size_t cols, std::size_t stride) noexcept {
     if (rows == 0 || cols == 0) return false;
 
@@ -125,6 +125,13 @@ inline bool copy_boundaries(const double* __restrict old_data, double* __restric
     std::memcpy(new_data, old_data, cols * sizeof(double));
     if (rows > 1)
         std::memcpy(new_data + (rows-1) * stride, old_data + (rows-1) * stride, cols * sizeof(double));
+
+    // With fewer than 3 columns everything is a boundary
+    if (cols < 3) {
+        for (std::size_t i = 1; i + 1 < rows; ++i)
+            std::memcpy(new_data + i * stride, old_data + i * stride, cols * sizeof(double));
+        return false;
+    }
 
     return rows >= 3;
 }
