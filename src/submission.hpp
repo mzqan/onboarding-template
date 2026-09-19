@@ -52,7 +52,6 @@ struct AlignedFree { void operator()(double* p) const noexcept { std::free(p); }
 // unique ptr is one implementation of RAII, requires instance of deleter (AlignedFree)
 using AlignedBuffer = std::unique_ptr<double[], AlignedFree>;
 
-
 static AlignedBuffer make_aligned_buffer(std::size_t count) {
     if (count == 0) return {};
     
@@ -115,9 +114,9 @@ public:
     }
 };
 
-// Copy the top and bottom boundary rows from old_grid to new_grid unchanged
-// Returns true if there is an interior to stencil (rows >= 3 AND cols >= 3),
-// false if the boundary covers the entire grid => apply_stencil early return.
+// Copy the top and bottom boundary rows from old_grid to new_grid
+// Returns true if there is an interior to stencil,
+// false if the boundary covers the entire grid
 inline bool copy_boundaries(const double* __restrict old_data, double* __restrict new_data, std::size_t rows, std::size_t cols, std::size_t stride) noexcept {
     if (rows == 0 || cols == 0) return false;
 
@@ -126,7 +125,7 @@ inline bool copy_boundaries(const double* __restrict old_data, double* __restric
     if (rows > 1)
         std::memcpy(new_data + (rows-1) * stride, old_data + (rows-1) * stride, cols * sizeof(double));
 
-    // With fewer than 3 columns everything is a boundary
+    // everything is a boundary for 1 or 2 col. grids
     if (cols < 3) {
         for (std::size_t i = 1; i + 1 < rows; ++i)
             std::memcpy(new_data + i * stride, old_data + i * stride, cols * sizeof(double));
@@ -136,20 +135,18 @@ inline bool copy_boundaries(const double* __restrict old_data, double* __restric
     return rows >= 3;
 }
 
-// Parallelizes the five-point stencil over all interior rows [1, rows-1).
-// schedule(static) pre-divides rows evenly — every row does identical work.
-// if(...) skips thread-spawn overhead for grids too small to benefit.
-inline void apply_stencil_interior(const double* __restrict old_data, double*       __restrict new_data, std::size_t rows, std::size_t cols, std::size_t stride) noexcept {
+// Applies five-point stencil over all interior rows [1, rows-1).
+inline void apply_stencil_interior(const double* __restrict old_data, double* __restrict new_data, std::size_t rows, std::size_t cols, std::size_t stride) noexcept {
     const std::size_t interior_cols = cols - 2;
 
     // parallelism: rows are independent and cost the same (reads old_grid), schedule(static) splits them in equal chunks without sync nor load-balancing
     #pragma omp parallel for schedule(static)
     for (std::size_t i = 1; i < rows - 1; ++i){
         // tells compiler to use AVX2's vmovdqa (32-byte aligned) over vmovdqu (unaligned) load instruction => faster
-        const double* row_cur   = static_cast<const double*>(__builtin_assume_aligned(old_data +  i      * stride, kRowAlign));
+        const double* row_cur   = static_cast<const double*>(__builtin_assume_aligned(old_data +  i * stride, kRowAlign));
         const double* row_above = static_cast<const double*>(__builtin_assume_aligned(old_data + (i - 1) * stride, kRowAlign));
         const double* row_below = static_cast<const double*>(__builtin_assume_aligned(old_data + (i + 1) * stride, kRowAlign));
-        double*       row_dst   = static_cast<double*>      (__builtin_assume_aligned(new_data +  i      * stride, kRowAlign));
+        double*       row_dst   = static_cast<double*>      (__builtin_assume_aligned(new_data +  i * stride, kRowAlign));
 
         // left and right boundaries copied while row i is already in cache
         row_dst[0] = row_cur[0];
@@ -170,8 +167,8 @@ inline void apply_stencil_interior(const double* __restrict old_data, double*   
     }
 }
 
-// Apply the five-point stencil over all interior points, copying boundary
-// values unchanged from old_grid to new_grid.
+// Apply the five-point stencil over all interior points
+// Keep boundary values unchanged from old_grid to new_grid
 void apply_stencil(const Grid& old_grid, Grid& new_grid){
     const auto& [rows, cols] = old_grid.shape();
     const std::size_t stride = old_grid.strides()[0];
