@@ -71,6 +71,14 @@ public:
     }
 };
 
+// copy top and bottom boundary rows into new_view (includes corners)
+inline void copy_boundaries(View<const double, 2> old_view, View<double, 2> new_view, std::size_t rows, std::size_t cols) {
+    for (std::size_t i = 0; i < cols; ++i){
+        new_view(0, i) = old_view(0, i);
+        new_view(rows - 1, i) = old_view(rows - 1, i);
+    }
+}
+
 // Apply the five-point stencil over all interior points, copying the boundary
 // values unchanged from old_grid to new_grid
 void apply_stencil(const Grid& old_grid, Grid& new_grid){
@@ -81,27 +89,20 @@ void apply_stencil(const Grid& old_grid, Grid& new_grid){
     const double* __restrict old_data {old_view.data};
     double* __restrict new_data {new_view.data};
 
-    const std::size_t rows {old_grid.shape()[0]};
-    const std::size_t cols {old_grid.shape()[1]};
+    const auto& [rows, cols] = old_grid.shape();
     const std::size_t stride {old_grid.strides()[0]};
 
-    // top-bottom boundary unchanged
-    for (std::size_t i = 0; i < cols; ++i){
-        new_view(0, i) = old_view(0, i);
-        new_view(rows - 1, i) = old_view(rows - 1, i);
-    }
-
-    //left-right boundary unchanged
-    for (std::size_t i = 1; i < rows - 1; ++i){
-        new_view(i, 0) = old_view(i, 0);
-        new_view(i, cols - 1) = old_view(i, cols - 1);
-    }
+    copy_boundaries(old_view, new_view, rows, cols);
 
     // parallelize rows (outputs independent from one another)
     #pragma omp parallel for
     for (std::size_t i = 1; i < rows - 1; ++i){
 
         const std::size_t row_start {i * stride};
+
+        // left and right boundaries copied while row i is already in cache
+        new_data[row_start]            = old_data[row_start];
+        new_data[row_start + cols - 1] = old_data[row_start + cols - 1];
 
         // vectorize inner loop (cols are contiguous in memory)
         #pragma omp simd
