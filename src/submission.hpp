@@ -76,7 +76,8 @@ private:
     std::array<std::size_t, 2> shape_;
     std::array<std::size_t, 2> strides_;
     AlignedBuffer data_;
-    // cell (0,0) is placed kRowPrefix doubles in
+    //points at cell (0,0) by skipping kRowPrefix doubles
+    double* base_{nullptr};
 public:
     Grid(std::size_t rows, std::size_t cols)
         : shape_{rows, cols}
