@@ -7,7 +7,7 @@
 #include <array>
 #include <new>
 
-// can access Grid data using its shape and strides without copying it
+// non-owning view: index Grid data via shape/strides without copying the (large) buffer
 template <typename T, std::size_t N>
 struct View {
     T* data;
@@ -31,22 +31,21 @@ struct View {
     }
 };
 
-// cache line is 64B on the x86-64 evaluator
+// match the 64B cache line: an aligned row start keeps each vectorized load (32B under AVX2) contained within one cache line
 static constexpr std::size_t kCacheLine = 64;
 static constexpr std::size_t kLaneElements = kCacheLine / sizeof(double);
 
-// interior loop starts at col 1, so prefix each row by (lane - 1) doubles such that col 1 is on a 64-byte boundary => aligned loads
+// hot loop starts at col 1; prefix (lane - 1) doubles so col 1 is 64B-aligned
 static constexpr std::size_t kRowPrefix = kLaneElements - 1;
 static constexpr std::size_t kPrefixBytes = kRowPrefix * sizeof(double);
 
 // round up to next multiple of align (must be power of 2)
 static constexpr std::size_t round_up(std::size_t n, std::size_t align) noexcept {
-    // add (align - 1) to "overshoot"
-    // truncate down by zeroing bits to remain a multiple of align 
+    // "overshoot" by (align - 1), then zero lower bits to ensure a multiple of align
     return (n + align - 1u) & ~(align - 1u);
 }
 
-// pad each row to whole cache lines so every row's col 1 keeps the same 64-byte alignment
+// pad rows to whole cache lines so advancing by stride keeps every row's col 1 on the same 64B alignment
 static std::size_t padded_stride(std::size_t cols) noexcept {
     return round_up((cols + kRowPrefix) * sizeof(double), kCacheLine) / sizeof(double);
 }
@@ -65,7 +64,7 @@ static AlignedBuffer make_aligned_buffer(std::size_t count) {
     void* raw = std::aligned_alloc(kCacheLine, bytes);
     if (!raw) throw std::bad_alloc{};
     
-    // zero-initialize
+    // zero padding cells
     std::memset(raw, 0, bytes);
 
     return AlignedBuffer{static_cast<double*>(raw)};
@@ -76,7 +75,7 @@ private:
     std::array<std::size_t, 2> shape_;
     std::array<std::size_t, 2> strides_;
     AlignedBuffer data_;
-    //points at cell (0,0) by skipping kRowPrefix doubles
+    // skip the prefix so operator() indexes from (0,0); the alignment padding stays hidden from callers
     double* base_{nullptr};
 public:
     Grid(std::size_t rows, std::size_t cols)
@@ -85,6 +84,7 @@ public:
         , data_{make_aligned_buffer(kRowPrefix + rows * strides_[0])}
         , base_{data_.get() ? data_.get() + kRowPrefix : nullptr} {}
 
+    // owns a heap buffer: forbid copies (would double-free / duplicate MBs), allow cheap moves
     Grid(const Grid&) = delete;
     Grid& operator=(const Grid&) = delete;
     Grid(Grid&&) = default;
@@ -121,9 +121,8 @@ public:
     }
 };
 
-// Copy the top and bottom boundary rows from old_grid to new_grid
-// Returns true if there is an interior to stencil,
-// false if the boundary covers the entire grid
+// Copy top/bottom boundary rows from old_grid to new_grid.
+// Returns true if there's an interior to stencil, false if boundaries cover the whole grid
 inline bool copy_boundaries(const double* __restrict old_data, double* __restrict new_data, std::size_t rows, std::size_t cols, std::size_t stride) noexcept {
     if (rows == 0 || cols == 0) return false;
 
@@ -149,8 +148,8 @@ inline void apply_stencil_interior(const double* __restrict old_data, double* __
     // parallelism: rows are independent and cost the same (reads old_grid), schedule(static) splits them in equal chunks without sync nor load-balancing
     #pragma omp parallel for schedule(static)
     for (std::size_t i = 1; i < rows - 1; ++i){
-        // each row's col 0 sits kPrefixBytes into a cache line (col 1 is aligned)
-        // tells compiler to emit vmovapd (aligned) over vmovupd load instruction => faster
+        // col 1 is on a 64-byte boundary, so center loads (row_*[j+1]) and the store are aligned;
+        // the ±1 neighbor loads stay unaligned but hit the same cached row, so no extra traffic
         const double* row_cur   = static_cast<const double*>(__builtin_assume_aligned(old_data +  i * stride, kCacheLine, kPrefixBytes));
         const double* row_above = static_cast<const double*>(__builtin_assume_aligned(old_data + (i - 1) * stride, kCacheLine, kPrefixBytes));
         const double* row_below = static_cast<const double*>(__builtin_assume_aligned(old_data + (i + 1) * stride, kCacheLine, kPrefixBytes));
@@ -182,6 +181,7 @@ void apply_stencil(const Grid& old_grid, Grid& new_grid){
     const auto& [rows, cols] = old_grid.shape();
     const std::size_t stride = old_grid.strides()[0];
 
+    // __restrict promises old/new never alias, letting the compiler vectorize without reload guards
     const double* __restrict old_data = old_grid.view().data;
     double* __restrict new_data = new_grid.view().data;
 
