@@ -67,6 +67,8 @@ struct AlignedAllocator {
     void deallocate(T* p, std::size_t) noexcept {
         ::operator delete(p, std::align_val_t{Alignment});
     }
+
+    template <typename U> struct rebind { using other = AlignedAllocator<U, Alignment>; };
 };
 
 // stateless, so any instance can free another's memory => always equal
