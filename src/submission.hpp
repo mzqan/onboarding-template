@@ -1,10 +1,9 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdlib>
 #include <cstring>
-#include <memory>
 #include <array>
+#include <vector>
 #include <new>
 
 // non-owning view: index Grid data via shape/strides without copying the (large) buffer
@@ -50,54 +49,56 @@ static std::size_t padded_stride(std::size_t cols) noexcept {
     return round_up((cols + kRowPrefix) * sizeof(double), kCacheLine) / sizeof(double);
 }
 
-// RAII: resource acquisition is initialization, ties resource lifetime to object
-// when object is destroyed, resource is automatically released
-struct AlignedFree { void operator()(double* p) const noexcept { std::free(p); } };
-// unique ptr is one implementation of RAII, requires instance of deleter (AlignedFree)
-using AlignedBuffer = std::unique_ptr<double[], AlignedFree>;
+// minimal allocator to give std::vector a cache-line-aligned base
+template <typename T, std::size_t Alignment>
+struct AlignedAllocator {
+    using value_type = T;   // element type
+    static_assert((Alignment & (Alignment - 1)) == 0, "alignment must be a power of two");
+    static_assert(Alignment >= alignof(T));
 
-static AlignedBuffer make_aligned_buffer(std::size_t count) {
-    if (count == 0) return {};
-    
-    const std::size_t bytes = round_up(count * sizeof(double), kCacheLine);
-    
-    void* raw = std::aligned_alloc(kCacheLine, bytes);
-    if (!raw) throw std::bad_alloc{};
-    
-    // zero padding cells
-    std::memset(raw, 0, bytes);
+    AlignedAllocator() noexcept = default;
+    // allows a container to rebuild this allocator for a different type
+    template <typename U>
+    AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {}
 
-    return AlignedBuffer{static_cast<double*>(raw)};
-}
+    T* allocate(std::size_t n) {
+        return static_cast<T*>(::operator new(n * sizeof(T), std::align_val_t{Alignment}));
+    }
+    void deallocate(T* p, std::size_t) noexcept {
+        ::operator delete(p, std::align_val_t{Alignment});
+    }
+};
+
+// stateless, so any instance can free another's memory => always equal
+template <typename T, typename U, std::size_t A>
+bool operator==(const AlignedAllocator<T, A>&, const AlignedAllocator<U, A>&) noexcept { return true; }
+template <typename T, typename U, std::size_t A>
+bool operator!=(const AlignedAllocator<T, A>&, const AlignedAllocator<U, A>&) noexcept { return false; }
 
 class Grid {
 private:
+    // RAII: std::vector ties buffer's lifetime to the object, freeing it automatically on destruction
+    // 2nd arg is the allocator; default std::allocator only aligns to 16B but we want 64B-aligned
+    using Storage = std::vector<double, AlignedAllocator<double, kCacheLine>>;
+
     std::array<std::size_t, 2> shape_;
     std::array<std::size_t, 2> strides_;
-    AlignedBuffer data_;
-    // skip the prefix so operator() indexes from (0,0); the alignment padding stays hidden from callers
-    double* base_{nullptr};
+    Storage data_;
 public:
     Grid(std::size_t rows, std::size_t cols)
         : shape_{rows, cols}
         , strides_{padded_stride(cols), 1}
-        , data_{make_aligned_buffer(kRowPrefix + rows * strides_[0])}
-        , base_{data_.get() ? data_.get() + kRowPrefix : nullptr} {}
+        , data_(kRowPrefix + rows * strides_[0]) {}  // () value-inits to 0.0
 
-    // owns a heap buffer: forbid copies (would double-free / duplicate MBs), allow cheap moves
-    Grid(const Grid&) = delete;
-    Grid& operator=(const Grid&) = delete;
-    Grid(Grid&&) = default;
-    Grid& operator=(Grid&&) = default;
-
+    // skip kRowPrefix so callers index from logical (0,0); alignment padding stays hidden
     // r/w
     double& operator()(std::size_t row, std::size_t col){
-        return base_[row * strides_[0] + col];
+        return data_[kRowPrefix + row * strides_[0] + col];
     }
 
     // read-only
     const double& operator()(std::size_t row, std::size_t col) const{
-        return base_[row * strides_[0] + col];
+        return data_[kRowPrefix + row * strides_[0] + col];
     }
 
     // # of elements per dimension
@@ -112,12 +113,12 @@ public:
 
     // r/w
     View<double, 2> view(){
-        return {base_, shape_, strides_};
+        return {data_.data() + kRowPrefix, shape_, strides_};
     }
 
     // read-only
     View<const double, 2> view() const{
-        return {base_, shape_, strides_};
+        return {data_.data() + kRowPrefix, shape_, strides_};
     }
 };
 
