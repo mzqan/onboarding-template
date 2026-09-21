@@ -142,16 +142,20 @@ inline void copy_boundaries(const double* __restrict old_data, double* __restric
 
 // Applies five-point stencil over all interior rows [1, rows-1).
 inline void apply_stencil_interior(const double* __restrict old_data, double* __restrict new_data, std::size_t rows, std::size_t cols, std::size_t stride) noexcept {
+    assert(rows >= 3 && cols >= 3);          // caller guarantees this; prevents cols-2 unsigned underflow
     const std::size_t interior_cols = cols - 2;
 
     // parallelism: rows are independent and cost the same (reads old_grid), schedule(static) splits them in equal chunks without sync nor load-balancing
     #pragma omp parallel for schedule(static)
     for (std::size_t i = 1; i < rows - 1; ++i){
         // shift each row pointer to column 1 (64B-aligned) so it becomes offset 0
-        const double* cur1 = old_data +  i * stride + 1;        // curr row
-        const double* above1 = old_data + (i - 1) * stride + 1; // row above
-        const double* below1 = old_data + (i + 1) * stride + 1; // row below
-        double* dst1 = new_data +  i * stride + 1;              // destination row
+        const double* cur1 = old_data +  i * stride + 1;        // curr
+        const double* above1 = old_data + (i - 1) * stride + 1; // above neighbour
+        const double* below1 = old_data + (i + 1) * stride + 1; // row below neighbour
+        const double* left1  = cur1 - 1;                        // left neighbour
+        const double* right1 = cur1 + 1;                        // right neighbour
+
+        double* dst1 = new_data +  i * stride + 1;              // destination
 
         // left/right boundary cells are copied (unchanged)
         dst1[-1] = cur1[-1];                // leftmost col
@@ -161,14 +165,13 @@ inline void apply_stencil_interior(const double* __restrict old_data, double* __
         // hot path: writes start at col 1, aligned(...:64) signals to compiler to emit faster aligned SIMD loads/stores instead of unaligned ones
         #pragma omp simd aligned(cur1, above1, below1, dst1 : kCacheLine)
         for (std::size_t j = 0; j < interior_cols; ++j){
-            // cur1[j] is column j+1; index re-based to 0 so SIMD packs 4 doubles/AVX2 op with no leading partial chunk
             dst1[j] =
                 0.5  * cur1[j]          // center
                 + 0.125 * (
-                    above1[j]       // up
-                    + below1[j]     // down
-                    + cur1[j - 1]   // left
-                    + cur1[j + 1]   // right
+                    above1[j]
+                    + below1[j]
+                    + left1[j]
+                    + right1[j]
                 );
         }
     }
