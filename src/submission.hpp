@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <cassert>
 #include <array>
 #include <vector>
 #include <new>
@@ -36,7 +37,6 @@ static constexpr std::size_t kLaneElements = kCacheLine / sizeof(double);
 
 // hot loop starts at col 1; prefix (lane - 1) doubles so col 1 is 64B-aligned
 static constexpr std::size_t kRowPrefix = kLaneElements - 1;
-static constexpr std::size_t kPrefixBytes = kRowPrefix * sizeof(double);
 
 // round up to next multiple of align (must be power of 2)
 static constexpr std::size_t round_up(std::size_t n, std::size_t align) noexcept {
@@ -125,23 +125,19 @@ public:
 };
 
 // Copy top/bottom boundary rows from old_grid to new_grid.
-// Returns true if there's an interior to stencil, false if boundaries cover the whole grid
-inline bool copy_boundaries(const double* __restrict old_data, double* __restrict new_data, std::size_t rows, std::size_t cols, std::size_t stride) noexcept {
-    if (rows == 0 || cols == 0) return false;
+inline void copy_boundaries(const double* __restrict old_data, double* __restrict new_data, std::size_t rows, std::size_t cols, std::size_t stride) noexcept {
+    if (rows == 0 || cols == 0) return;
 
     // memcpy avoids per-element stride arithmetic and View overhead (vs. for loop + assignment)
     std::memcpy(new_data, old_data, cols * sizeof(double));
     if (rows > 1)
         std::memcpy(new_data + (rows-1) * stride, old_data + (rows-1) * stride, cols * sizeof(double));
 
-    // everything is a boundary for 1 or 2 col. grids
+    // everything is a boundary for 1 or 2 col. grids, copy the interior rows too
     if (cols < 3) {
         for (std::size_t i = 1; i + 1 < rows; ++i)
             std::memcpy(new_data + i * stride, old_data + i * stride, cols * sizeof(double));
-        return false;
     }
-
-    return rows >= 3;
 }
 
 // Applies five-point stencil over all interior rows [1, rows-1).
@@ -151,28 +147,28 @@ inline void apply_stencil_interior(const double* __restrict old_data, double* __
     // parallelism: rows are independent and cost the same (reads old_grid), schedule(static) splits them in equal chunks without sync nor load-balancing
     #pragma omp parallel for schedule(static)
     for (std::size_t i = 1; i < rows - 1; ++i){
-        // col 1 is on a 64-byte boundary, so center loads (row_*[j+1]) and the store are aligned;
-        // the ±1 neighbor loads stay unaligned but hit the same cached row, so no extra traffic
-        const double* row_cur   = static_cast<const double*>(__builtin_assume_aligned(old_data +  i * stride, kCacheLine, kPrefixBytes));
-        const double* row_above = static_cast<const double*>(__builtin_assume_aligned(old_data + (i - 1) * stride, kCacheLine, kPrefixBytes));
-        const double* row_below = static_cast<const double*>(__builtin_assume_aligned(old_data + (i + 1) * stride, kCacheLine, kPrefixBytes));
-        double* row_dst = static_cast<double*>(__builtin_assume_aligned(new_data +  i * stride, kCacheLine, kPrefixBytes));
+        // shift each row pointer to column 1 (64B-aligned) so it becomes offset 0
+        const double* cur1 = old_data +  i * stride + 1;        // curr row
+        const double* above1 = old_data + (i - 1) * stride + 1; // row above
+        const double* below1 = old_data + (i + 1) * stride + 1; // row below
+        double* dst1 = new_data +  i * stride + 1;              // destination row
 
-        // left and right boundaries copied while row i is already in cache
-        row_dst[0] = row_cur[0];
-        row_dst[cols - 1] = row_cur[cols - 1];
+        // left/right boundary cells are copied (unchanged)
+        dst1[-1] = cur1[-1];                // leftmost col
+        dst1[cols - 2] = cur1[cols - 2];    // rightmost col
 
-        // vectorization: compiler packs 4 doubles per AVX2 instruction cleanly (re-indexed to 0 instead of handling a leading partial chunk)
-        // hot path: writes start at col 1, kRowPrefix ensures a 64-byte boundary 
-        #pragma omp simd
+        // vectorization: compiler packs 4 doubles per AVX2 instruction cleanly
+        // hot path: writes start at col 1, aligned(...:64) signals to compiler to emit faster aligned SIMD loads/stores instead of unaligned ones
+        #pragma omp simd aligned(cur1, above1, below1, dst1 : kCacheLine)
         for (std::size_t j = 0; j < interior_cols; ++j){
-            row_dst[j + 1] =
-                0.5  * row_cur[j + 1]
+            // cur1[j] is column j+1; index re-based to 0 so SIMD packs 4 doubles/AVX2 op with no leading partial chunk
+            dst1[j] =
+                0.5  * cur1[j]          // center
                 + 0.125 * (
-                    row_above[j + 1]    // up
-                    + row_below[j + 1]  // down
-                    + row_cur[j]        // left
-                    + row_cur[j + 2]    // right
+                    above1[j]       // up
+                    + below1[j]     // down
+                    + cur1[j - 1]   // left
+                    + cur1[j + 1]   // right
                 );
         }
     }
@@ -182,13 +178,17 @@ inline void apply_stencil_interior(const double* __restrict old_data, double* __
 // Keep boundary values unchanged from old_grid to new_grid
 void apply_stencil(const Grid& old_grid, Grid& new_grid){
     const auto& [rows, cols] = old_grid.shape();
-    const std::size_t stride = old_grid.strides()[0];
+    const auto& [stride, col_stride] = old_grid.strides();
+    assert(col_stride == 1);
 
     // __restrict promises old/new never alias, letting the compiler vectorize without reload guards
     const double* __restrict old_data = old_grid.view().data;
     double* __restrict new_data = new_grid.view().data;
 
-    if (!copy_boundaries(old_data, new_data, rows, cols, stride)) return;
+    copy_boundaries(old_data, new_data, rows, cols, stride);
+
+    // no interior
+    if (rows < 3 || cols < 3) return;
 
     apply_stencil_interior(old_data, new_data, rows, cols, stride);
 }
