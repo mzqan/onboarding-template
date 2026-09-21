@@ -38,6 +38,15 @@ static constexpr std::size_t kLaneElements = kCacheLine / sizeof(double);
 // hot loop starts at col 1; prefix (lane - 1) doubles so col 1 is 64B-aligned
 static constexpr std::size_t kRowPrefix = kLaneElements - 1;
 
+// on my CPU (6-core i7-1365U):
+//
+//   cells (rows*cols)   serial us   2-thread us
+//        2304 (48x48)       0.83        1.22
+//        4096 (64x64)       2.32        1.91
+//        9216 (96x96)       3.28        3.58
+//       16384 (128x128)     7.72        5.90
+static constexpr std::size_t kParallelMinCells = 4096;
+
 // round up to next multiple of align (must be power of 2)
 static constexpr std::size_t round_up(std::size_t n, std::size_t align) noexcept {
     // "overshoot" by (align - 1), then zero lower bits to ensure a multiple of align
@@ -146,7 +155,8 @@ inline void apply_stencil_interior(const double* __restrict old_data, double* __
     const std::size_t interior_cols = cols - 2;
 
     // parallelism: rows are independent and cost the same (reads old_grid), schedule(static) splits them in equal chunks without sync nor load-balancing
-    #pragma omp parallel for schedule(static)
+    //      only if it's "worth it", we don't want the extra overhead for smaller/"trivial" grids
+    #pragma omp parallel for schedule(static) if (rows * cols >= kParallelMinCells)
     for (std::size_t i = 1; i < rows - 1; ++i){
         // shift each row pointer to column 1 (64B-aligned) so it becomes offset 0
         const double* cur1 = old_data +  i * stride + 1;        // curr
